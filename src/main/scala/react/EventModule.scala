@@ -59,8 +59,19 @@ trait EventModule { module: Domain =>
       }
     }
 
+    protected class TakeUntil(last: A => Boolean) extends StrictEvents1[A, A](outer) {
+      private var finished = false
+      protected[this] def react(a: A @uncheckedVariance) = {
+        if (finished) disconnect()
+        else {
+          emit(a)
+          finished = last(a)
+        }
+      }
+    }
+
     protected class Dropped(private var count: Int) extends StrictEvents1[A, A](outer) {
-      protected[this] def react(a: A) {
+      protected[this] def react(a: A @uncheckedVariance) = {
         if (count > 0) count -= 1
         else emit(a)
       }

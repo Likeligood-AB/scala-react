@@ -76,7 +76,7 @@ trait SignalModule { module: Domain =>
 
     override def reactiveDescriptor = "Strict Signal"
   }
-
+  
   abstract class LazyFuncSignal[A] extends FuncSignal[A] with LazyNode
 
   class LazyOpSignal[A](op: => A) extends LazyFuncSignal[A] {
@@ -123,9 +123,9 @@ trait SignalModule { module: Domain =>
     tick()
   }
 
-    /**
-     * Creates a mutable signal with the given owner.
-     */
+  /**
+   * Creates a mutable signal with the given owner.
+   */
   def Var[A](init: A)(using
                          ctx: Context,
                          @implicitNotFound("This method can only be used within a react context")
@@ -157,6 +157,40 @@ trait SignalModule { module: Domain =>
         emit(a)
         if(isEmitting) engine.defer(this)
       }
+    }
+
+    def overrideValue(a: A): Unit = {
+      pulse = a
+      if(owner eq DomainOwner) channel.pushOverride(this, a)
+      else {
+        emit(a)
+        if(isEmitting) engine.defer(this)
+      }
+    }
+
+    def doVarUpdates()(using ctx: Context): Unit = {
+      import scala.jdk.CollectionConverters.*
+      engine.updateChain.asScala.groupBy(_._1) foreach {
+        case (v: Var[t], ops) =>
+          given ctx.LeafNodeContext = null
+          var current: t = v.now
+          type Op = t => t
+          ops foreach {
+            case VarUpdatePair(_, op: Op @unchecked) =>
+              current = op(current)
+          }
+          v() = current
+      }
+      engine.updateChain.clear()
+    }
+
+    def updateLater(using ctx: Context)(op: ctx.LeafNodeContext ?=> A => A): Unit = {
+      given ctx.LeafNodeContext = null
+      if (engine.updateChain.isEmpty) {
+        doUpdateLater { doVarUpdates() }
+      }
+
+      engine.updateChain.add(VarUpdatePair(this, op))
     }
 
     override def reactiveDescriptor = "Var"
