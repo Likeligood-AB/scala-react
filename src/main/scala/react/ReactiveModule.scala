@@ -1,5 +1,18 @@
 package react
+
 import java.lang.ref.WeakReference
+
+import scala.annotation.implicitNotFound
+import scala.collection.immutable.Seq
+import scala.util.NotGiven
+
+object ReactiveModule {
+  val LastNormalLevel = Int.MaxValue - 5
+  val DoLaterLevel = LastNormalLevel + 1
+  val ObserveLevel = LastNormalLevel + 2
+  val UpdateLaterLevel = LastNormalLevel + 3
+  val DoLastLevel = LastNormalLevel + 4
+}
 
 /**
  * Defines the base classes for the reactive framework.
@@ -9,6 +22,18 @@ import java.lang.ref.WeakReference
  */
 abstract class ReactiveModule extends EngineModule { module: Domain =>
   object MuteControl extends scala.util.control.ControlThrowable
+  import ReactiveModule.*
+
+  @implicitNotFound("This method can only be used within a react context")
+  class Context(val owner: Owner) {
+    @implicitNotFound("Signals can only be subscribed to inside dependency nodes")
+    class DependencyNodeContext
+    class LeafNodeContext
+    class NoContext
+  }
+  object Context {
+    given domainCtx: Context = Context(owner)
+  }
 
   /**
    * Control flow operator similar to `break`. May only be used inside a `mutable` block inside of
@@ -21,7 +46,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * Control flow operator similar to `breakable`. Retutrns `true` if `mute` was not called in `op`,
    * returns `false` otherwise. Some combinators use this internally, e.g., `Events.scanMutable`.
    */
-  @inline final def mutable[B](op: => B): Boolean = try {
+  @inline final def muteable[B](op: => B): Boolean = try {
     op
     true
   } catch {
@@ -52,7 +77,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     new DoLaterNode(DoLastLevel) {
       given ctx.LeafNodeContext = null
       def react() = op
-  }
+    }
   }
   def doLaterAtObserve(using
               ctx: Context,
@@ -83,13 +108,15 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
   //def newDependents(): Dependents = PoolingWeakListSet.empty
 
   abstract class Tickable {
-    protected[react] def tick()
+    protected[react] def tick(): Unit
+
+    debug.assertExclusiveThread()
   }
 
   private object Node {
-    final private val TickNumMask: Long = ~(TickInvalidMask | TickMuteMask)
     final private val TickInvalidMask: Long = 1L << 63
     final private val TickMuteMask: Long = 1L << 62
+    final private val TickNumMask: Long = ~(TickInvalidMask | TickMuteMask)
   }
 
   abstract class Node extends Tickable {
@@ -102,10 +129,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * last time.
      */
     private var tickBits: Long = 1L
+    protected def getTickBits = tickBits
 
     private[react] val refs = new WeakReference(this)
 
-    import Node._
+    import Node.*
     protected def isPulseValid = (tickBits & TickInvalidMask) == 0
     def lastTicked = tickBits & TickNumMask
 
@@ -115,25 +143,29 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * if checkTopology() would throw an exception when this method is called, the behavior of
      * this method is undefined.
      */
-    protected def validatePulse() {
+    protected def validatePulse() = {
       if (!isPulseValid) {
         doValidatePulse()
         setPulseValid()
       }
     }
 
-    protected def doValidatePulse()
+    protected def doValidatePulse(): Unit
 
-    protected def setPulseValid() {
+    protected def setPulseValid() = {
       if (!isPulseValid) setNotEmitting()
+    }
+
+    final protected[react] def invalidateInitial(): Unit = {
+      tickBits = (engine.currentTurn - 1) | TickInvalidMask
     }
 
     /**
      * Mark as invalid and return 'true' if this node has not been invalidated in this turn yet,
      * otherwise do nothing but return `false`.
      */
-    final protected[react] def invalidate(): Boolean = {
-      val mask = engine.currentTurn | TickInvalidMask
+    final protected[react] def invalidate(turn: Option[Long] = None): Boolean = {
+      val mask = turn.getOrElse(engine.currentTurn) | TickInvalidMask
       if (tickBits == mask) false
       else {
         tickBits = mask
@@ -143,15 +175,13 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
     def isEmitting: Boolean = tickBits == engine.currentTurn
 
-    protected def setEmitting() {
+    protected def setEmitting() = {
       assert((engine.currentTurn & TickInvalidMask & TickMuteMask) == 0) // overflow
       tickBits = engine.currentTurn
     }
-    protected def setNotEmitting() {
+    protected def setNotEmitting() = {
       tickBits = engine.currentTurn | TickMuteMask
     }
-
-    engine.newNode(this)
 
     /**
      * The topological depth value of this node.
@@ -161,7 +191,19 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * because of virtual calls and potential indirections because of traits and when accessing
      * the level of a dependency. Lesson learned: stick with a var for all nodes.
      */
-    protected[react] var level = 0
+    private[this] var level_ = initialLevel
+    protected[react] final def level = level_
+    protected[react] def initialLevel = 0
+    protected[react] def updateLevel(newLevel: Int, location: Int): Unit = {
+      levelUpdated(level_, newLevel, location)
+      level_ = newLevel
+    }
+
+    /**
+     * Invoked when the level is hoisted for this node.
+     * (oldLevel, newLevel) => Unit
+     */
+    def levelUpdated = (_: Int, _: Int, _: Int) => ()
 
     def name: String = debug.getName(this)
     def name_=(nme: String): this.type = { debug.setName(this, nme); this }
@@ -173,18 +215,18 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * propagation set. As this method may be called out of topolical order, implementations should
      * not access this node's dependencies.
      */
-    protected[react] def tick()
+    protected[react] def tick(): Unit
 
     /**
      * Ticks this nodes dependents. Does nothing, if or when this nodes does not have dependents.
      */
-    protected def tickDependents()
+    protected def tickDependents(): Unit
 
     /**
      * Throws an exception if accessed from a level <= the level of this node. No-op otherwise.
      */
-    def checkTopology() =
-      if (level >= engine.currentLevel) engine.levelMismatch(this)
+    def checkTopology(cause: Node, location: Int) =
+      if (level >= engine.currentLevel) engine.levelMismatch(this, cause, location)
 
     /**
      * Makes sure that the value of this node is consistent. Might be called multiple times in a
@@ -192,7 +234,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * if checkTopology() would throw an exception when this method is called, the behavior of
      * this method is undefined.
      */
-    protected def validateValue()
+    protected def validateValue(): Unit
 
     def isDisposed: Boolean = tickBits == 0
 
@@ -202,9 +244,9 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * Subclasses that override this method should always call `super.disconnect()`
      * so effects of this method are chained.
      */
-    protected def disconnect() { tickBits = 0 }
+    protected def disconnect() = { tickBits = 0 }
 
-    def dispose() {
+    def dispose() = {
       disconnect()
     }
 
@@ -221,13 +263,13 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * A node that does nothing.
    */
   trait MuteNode extends Node {
-    protected[react] def tick() {}
+    protected[react] def tick() = {}
     override def isEmitting = false
-    override protected def tickDependents() {}
-    override def checkTopology() {}
-    override protected def validatePulse() {}
-    override def doValidatePulse() {}
-    override protected def validateValue() {}
+    override protected def tickDependents() = {}
+    override def checkTopology(cause: Node, location: Int) = {}
+    override protected def validatePulse() = {}
+    override def doValidatePulse() = {}
+    override protected def validateValue() = {}
   }
 
   object NilNode extends MuteNode
@@ -239,7 +281,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * its dependents until the engine tells this node to evaluate.
    */
   trait StrictNode extends Node {
-    protected[react] def tick() {
+    protected[react] def tick() = {
       if (invalidate()) engine.defer(this)
     }
 
@@ -247,7 +289,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * Called by the engine when this node defered itself in `tick`. Always called in topological
      * order, so implementations may safely access its dependencies.
      */
-    protected[react] def tock() {
+    protected[react] def tock() = {
       validatePulse()
       if (isEmitting) tickDependents()
     }
@@ -261,21 +303,27 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * before it is queried.
    */
   trait LazyNode extends Node {
-    invalidate()
+    invalidateInitial()
 
-    protected[react] def tick() {
+    protected[react] def tick() = {
       if (invalidate()) tickDependents()
     }
   }
 
-  trait LeafNode extends StrictNode {
-    level = Int.MaxValue
-    protected def tickDependents() {}
+  abstract class LeafNode(_level: Int) extends StrictNode {
+    updateLevel(_level, 1)
+    protected def tickDependents() = {}
     protected def isValueValid = true
-    protected def doValidatePulse() { react(); setNotEmitting() }
-    protected def validateValue() {}
+    protected def doValidatePulse() = { react(); setNotEmitting() }
+    protected def validateValue() = {}
 
-    protected def react()
+    protected def react(): Unit
+  }
+
+  object accessDependents {
+    def apply(node: DependencyNode): Seq[Node] = {
+      node.debugReadDependents
+    }
   }
 
   /**
@@ -286,21 +334,43 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     // Null if empty, a single weak ref or an array of weak refs if not empty.
     // This turns out to be the fastest and one of the most space efficient ways to handle weak
     // dependencies (few indirections, no garbage as long as array is not resized).
-    private var dependents: AnyRef = null
+    private var dependents: AnyRef = _
+
+    debug.recordDependencyNode(this)
+
+    private[react] def debugReadDependents: Seq[Node] = {
+      dependents match {
+        case null => Nil
+        case wref: WeakReference[Node]@unchecked =>
+          val d = wref.get
+          if (d eq null) Nil
+          else if (d ne null) Seq(d)
+          else Nil
+        case arr: Array[WeakReference[Node]]@unchecked =>
+          (for (wref <- arr.toSeq) yield {
+            if (wref ne null) {
+              val d = wref.get
+              if (d eq null) Nil
+              else if (d ne null) Seq(d)
+              else Nil
+            } else Nil
+          }).flatten
+      }
+    }
 
     // Stuff in here is all inlined, since it is absolutely performance critical
 
     /**
      * Tick all dependents of this node.
      */
-    protected def tickDependents() {
+    protected def tickDependents() = {
       dependents match {
         case null =>
-        case wref: WeakReference[Node] =>
+        case wref: WeakReference[Node] @unchecked =>
           val d = wref.get
           if ((d eq null) || !d.isInstanceOf[ManagesDependencies] /*|| d.isDisposed*/) dependents = null
-          if (d ne null) d.tick()
-        case arr: Array[WeakReference[Node]] =>
+          if (d ne null) debug.tickAndRegister(d, this)
+        case arr: Array[WeakReference[Node]] @unchecked =>
           var i = 0
           while (i < arr.length) {
             val wref = arr(i)
@@ -309,7 +379,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
               if ((d eq null) || !d.isInstanceOf[ManagesDependencies] /*|| d.isDisposed*/) {
                 arr(i) = null
               }
-              if (d ne null) d.tick()
+              if (d ne null) debug.tickAndRegister(d, this)
             }
             i += 1
           }
@@ -319,15 +389,15 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Transitively hoist all dependents to new level.
      */
-    private[react] def hoistDependents(newLevel: Int) {
+    private[react] def hoistDependents(newLevel: Int): Unit = {
       // impl note: in contrast to tickDependents(), don't clear unmanaged dependencies
       dependents match {
         case null =>
-        case wref: WeakReference[Node] =>
+        case wref: WeakReference[Node] @unchecked =>
           val d = wref.get
           if (d eq null) dependents = null
           else engine.hoist(d, newLevel)
-        case arr: Array[WeakReference[Node]] =>
+        case arr: Array[WeakReference[Node]] @unchecked =>
           var i = 0
           while (i < arr.length) {
             val wref = arr(i)
@@ -344,11 +414,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Add the given node to this node's dependents, if not already present.
      */
-    protected[react] def subscribe(dep: Node) {
+    protected[react] def subscribe(dep: Node): Unit = {
       if ((dep ne NilNode) && !isDisposed) {
         dependents match {
           case null => dependents = dep.refs
-          case wref: WeakReference[Node] =>
+          case wref: WeakReference[Node] @unchecked =>
             if (wref eq dep.refs) return
             val d = wref.get
             if (d eq null) dependents = dep.refs
@@ -359,7 +429,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
               newDeps(1) = dep.refs.asInstanceOf[WeakReference[Node]]
               dependents = newDeps
             }
-          case arr: Array[WeakReference[Node]] =>
+          case arr: Array[WeakReference[Node]] @unchecked =>
             val oldSize = arr.length
             var i = 0
             while (i < oldSize) {
@@ -381,7 +451,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
 
             val newDeps = new Array[WeakReference[Node]](oldSize * 2)
-            compat.Platform.arraycopy(arr, 0, newDeps, 0, oldSize)
+            System.arraycopy(arr, 0, newDeps, 0, oldSize)
             newDeps(oldSize) = dep.refs.asInstanceOf[WeakReference[Node]]
             dependents = newDeps
         }
@@ -391,14 +461,14 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Removes the given node from this node's dependent set if present.
      */
-    protected[react] def unsubscribe(dep: Node) {
+    protected[react] def unsubscribe(dep: Node): Unit = {
       if (dep ne NilNode) {
         dependents match {
           case null =>
-          case wref: WeakReference[Node] =>
+          case wref: WeakReference[Node] @unchecked =>
             val d = wref.get
             if ((d eq null) || (d eq dep)) dependents = null
-          case arr: Array[WeakReference[Node]] =>
+          case arr: Array[WeakReference[Node]] @unchecked =>
             var i = 0
             while (i < arr.length) {
               val wref = arr(i)
@@ -416,7 +486,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
       }
     }
 
-    protected override def disconnect() {
+    protected override def disconnect() = {
       dependents = null
       super.disconnect()
     }
@@ -438,11 +508,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     protected def input: Reactive[P, V]
     //level = input.level + 1
 
-    protected def connect() {
+    protected def connect() = {
       input.subscribe(this)
     }
 
-    protected override def disconnect() {
+    protected override def disconnect() = {
       input.unsubscribe(this)
       super.disconnect()
     }
@@ -453,12 +523,12 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     protected def input2: Reactive[P, V]
     //level = math.max(input1.level, input2.level) + 1
 
-    protected def connect() {
+    protected def connect() = {
       input1.subscribe(this)
       input2.subscribe(this)
     }
 
-    protected override def disconnect() {
+    protected override def disconnect() = {
       input1.unsubscribe(this)
       input2.unsubscribe(this)
       super.disconnect()
@@ -469,11 +539,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     protected def inputs: Iterable[Reactive[Any, Any]]
     // level = inputs.foldLeft(0) { (l, r) => math.max(l, r.level) } + 1
 
-    protected def connect() {
+    protected def connect() = {
       inputs foreach { _ subscribe this }
     }
 
-    protected override def disconnect() {
+    protected override def disconnect() = {
       inputs foreach { _ unsubscribe this }
       super.disconnect()
     }
@@ -501,21 +571,21 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
     def isDefined: Boolean
 
-    protected def validateValue() {
+    protected def validateValue() = {
       if (!isValueValid) doValidateValue()
     }
 
-    protected def doValidateValue()
+    protected def doValidateValue(): Unit
     protected def isValueValid: Boolean
 
-    @inline final def ifDefined[U](f: V => U) {
-      checkTopology()
+    @inline final def ifDefined[U](f: V => U): Unit = {
+      checkTopology(this, 1)
       validateValue()
       if (isDefined) f(getValue)
     }
 
     @inline final def ifDefinedElse[B](f: V => B)(default: => B): B = {
-      checkTopology()
+      checkTopology(this, 2)
       validateValue()
       if (isDefined) f(getValue) else default
     }
@@ -525,7 +595,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * The result is undefined (it may throw an exception), if this reactive isn't currently
      * emitting.
      */
-    def getPulse: P
+    def getPulse: Any
 
     def pulseNow: Option[P] = ifEmittingElse[Option[P]](Some(_))(None)
 
@@ -533,11 +603,12 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * Runs the given function with the current value of this pulse, if this pulse is currently
      * present.
      */
-    @inline final def ifEmitting[U](f: P => U) {
-      checkTopology()
+    @inline final def ifEmitting[U](f: P => U): Unit = {
+      debug.assertExclusiveThread()
+      checkTopology(this, 3)
       validatePulse()
-      assert(isPulseValid)
-      if (isEmitting) f(getPulse)
+      assert(isPulseValid, s"isPulseValid is false in node ${debug.getName(this)} lvl=${engine.currentLevel}, turn=${engine.currentTurn}, tickBits=${getTickBits}")
+      if (isEmitting) f(getPulse.asInstanceOf[P])
     }
 
     /**
@@ -545,10 +616,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * if this pulse is currently present. Otheriwse, returns the given default value.
      */
     @inline final def ifEmittingElse[B](f: P => B)(default: => B): B = {
-      checkTopology()
+      debug.assertExclusiveThread()
+      checkTopology(this, 4)
       validatePulse()
       assert(isPulseValid)
-      if (isEmitting) f(getPulse) else default
+      if (isEmitting) f(getPulse.asInstanceOf[P]) else default
     }
 
     def changes: Events[P] = new ChangeEvents[P](this)
@@ -576,8 +648,8 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
       try {
         debug.assertInTurn()
         checkTopology(this, 5)
-      validateValue()
-      getValue
+        validateValue()
+        getValue
       } catch {
         case LevelMismatch =>
           throw LevelMismatch
@@ -607,7 +679,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Sets this reactive's state to 'not emitting'.
      */
-    protected[this] def mute() {
+    protected[this] def mute() = {
       assert(!isEmitting)
       freePulse()
       setNotEmitting()
@@ -618,12 +690,12 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      *
      * Unfortunately, this needs to stay untyped until SI-3272 is fixed, if that'll ever happen.
      */
-    protected[this] def emit(p: Any)
+    protected[this] def emit(p: Any): Unit
 
     /**
      * Frees garbage from pulse
      */
-    protected[react] def freePulse()
+    protected[react] def freePulse(): Unit
   }
 
   /**
@@ -633,11 +705,11 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
   trait SimpleEmitter[+P, +V] extends Emitter[P, V] { this: Reactive[P, V] =>
     // TODO: I'd like to move most of that stuff here to Emitter, but that triggers SI-3272 or
     // some variation.
-    protected[this] var pulse: P = _
+    protected[this] var pulse: Any = _
 
     def getPulse = pulse
 
-    protected[this] def emit(p: Any) {
+    protected[this] def emit(p: Any) = {
       //val oldPulse = getPulse
       //val oldValue = getValue
       pulse = p.asInstanceOf[P]
@@ -649,7 +721,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
       // }
     }
 
-    protected[react] def freePulse() { pulse = null.asInstanceOf[P] }
+    protected[react] def freePulse() = { pulse = null.asInstanceOf[P] }
   }
 
   /**
@@ -663,7 +735,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
   trait SimpleReactive[+P, +V] extends Reactive[P, V] with SimpleEmitter[P, V] {
     protected def isValueValid = isPulseValid
 
-    protected def doValidateValue() { doValidatePulse() }
+    protected def doValidateValue() = { doValidatePulse() }
   }
 
   trait DeltaReactive[+P, +V] extends Reactive[P, V] with DeltaEmitter[P, V]
@@ -673,20 +745,27 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * this means it evaluates some closure when notified, such as a `FuncSignal`.
    */
   trait OpaqueReactive[P, V] extends Reactive[P, V] {
-    level = math.max(1, level)
+    private val newLevel = math.max(1, level)
+    updateLevel(newLevel, 2)
 
-    protected def doValidatePulse() {
+    protected def doValidatePulse() = {
       depStackPush(this)
       try {
         // eval and let reactives consulted in `op` obtain our dependent
-        react()
+        if (debug.recordExecutionInfo) {
+          debug.executeAndRecord(this) {
+            react()
+          }
+        } else {
+          react()
+        }
       } finally {
         // always leave the dependent stack in a clean state.
         depStackPop()
       }
     }
 
-    protected def react()
+    protected def react(): Unit
   }
 
   /**
@@ -697,18 +776,18 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * It is safe to create instances of this trait off-turn. Observers must be created in a turn,
    * however.
    */
-  trait Observing { outer =>
+  class Observing() { outer =>
     private var _obRefs: AnyRef = null
 
-    protected abstract class Observer extends LeafNode {
+    abstract class Observer extends LeafNode(ObserveLevel) {
       ref()
 
-      protected override def disconnect() {
+      protected override def disconnect() = {
         super.disconnect()
         unref()
       }
 
-      protected def ref() {
+      protected def ref() = {
         _obRefs = _obRefs match {
           case null => this
           case ob: Observer => collection.immutable.Set(ob, this)
@@ -717,7 +796,7 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
         }
       }
 
-      protected def unref() {
+      protected def unref() = {
         _obRefs = _obRefs match {
           case null => null
           case x if x eq this => null
@@ -731,20 +810,42 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
     class Observer1[P, V](val input: Reactive[P, V], op: P => Unit) extends Observer with Dependent1[P, V] {
       input.subscribe(this)
-      def react() {
-        if (!isDisposed) input.ifEmitting(op)
+      def react() = {
+        if (debug.recordExecutionInfo) {
+          if (!isDisposed) input.ifEmitting(p => debug.executeAndRecord(this)(op(p)))
+        } else {
+          if (!isDisposed) input.ifEmitting(op)
+        }
       }
     }
 
     class ObserverOnce1[P, V](input: Reactive[P, V], op: P => Unit) extends Observer1[P, V](input, op) {
-      override def react() {
+      override def react() = {
         super.react()
         disconnect()
       }
     }
 
+    class ObserverUntil[P, V](val input: Reactive[P, V], op: P => Boolean) extends Observer with Dependent1[P, V] {
+      def newOp(pulse: P): Unit = {
+        if (op(pulse)) {
+          disconnect()
+        }
+      }
+
+      input.subscribe(this)
+
+      def react() = {
+        if (debug.recordExecutionInfo) {
+          if (!isDisposed) input.ifEmitting(p => debug.executeAndRecord(this)(newOp(p)))
+        } else {
+          if (!isDisposed) input.ifEmitting(newOp)
+        }
+      }
+    }
+
     class ObserverDynamic(op: => Unit) extends Observer {
-      def react() {
+      def react() = {
         depStackPush(this)
         try {
           op
@@ -819,21 +920,21 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
      * Runs `op` once, which might access signals through `Signal.apply`. Repeatedly runs `op`
      * when some of the signals accessed change. Might run `op` even if no signal has changed.
      */
-    protected def observeDynamic(op: => Unit): Observer = {
+    def observeDynamic(op: => Unit): Observer = {
       val ob = new ObserverDynamic(op)
       ob.tick()
       ob
     }
   }
 
-  trait Source[P, V] extends Reactive[P, V] {
+  private[react] trait Source[P, V] extends Reactive[P, V] {
     protected[this] def owner: Owner
-    level = owner.level
+    updateLevel(owner.level, 3)
     protected[react] def channel: Channel[P]
   }
 
-  trait SimpleSource[P, V] extends SimpleReactive[P, V] with Source[P, V] {
-    protected def doValidatePulse() {
+  private[react] trait SimpleSource[P, V] extends SimpleReactive[P, V] with Source[P, V] {
+    protected def doValidatePulse() = {
       val x = channel.get(this)
       emit(x)
     }
@@ -841,13 +942,20 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
   trait Channel[P] {
     def get(r: Reactive[P, Any]): P
-    def push(r: Reactive[P, Any], p: P)
+    def push(r: Reactive[P, Any], p: P): Unit
+    def pushOverride(r: Reactive[P, Any], p: P): Unit = push(r, p)
   }
 
   sealed trait Owner {
     protected[react] def level: Int
     def newChannel[P, V](r: Reactive[P, V], p: P): Channel[P]
   }
+
+  object Owner {
+    given owner: Owner = DomainOwner
+  }
+
+  val owner = DomainOwner
 
   object DomainOwner extends Owner {
     def level = 0
@@ -863,19 +971,17 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
 
     def newChannel[P, V](r: Reactive[P, V], p: P): Channel[P] = null
 
-    protected def tickDependents() {}
+    protected def tickDependents() = {}
 
-    protected def doValidatePulse() {
+    protected def doValidatePulse() = {
       react()
     }
 
-    protected def validateValue() {}
+    protected def validateValue() = {}
 
     //def get[P](r: Reactive[P, Any]): P = r.getPulse
     //def push[P](r: Reactive[P, Any], p: P) = r emit p
 
-    def react()
+    def react(): Unit
   }
-
-  implicit def owner: Owner = DomainOwner
 }

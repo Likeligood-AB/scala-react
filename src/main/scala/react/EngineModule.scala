@@ -147,85 +147,81 @@ abstract class EngineModule { self: Domain =>
       }
     }
 
-    def newNode(n: Node) {}
-
-    def defer(dep: StrictNode) {
+    def defer(dep: StrictNode): Unit = {
       debug.assertInTurn()
       val depLevel = dep.level
       if (depLevel == level) // fast path
         tryTock(dep)
       else if (depLevel < level) // can happen for signals that are created on the fly
         hoist(dep, level + 1)
-      else prioQueue += dep // default path
-    }
-
-    /**
-     * Exceptions are caught in the main propagation loop and passed to this method.
-     * Override to customize exception handling. The default behavior is to print a stack
-     * trace and `sys.exit`.
-     */
-    protected def uncaughtException(e: Throwable) {
-      Console.err.println("Uncaught exception in turn!")
-      e.printStackTrace()
-      sys.exit(-1)
+      else propQueue += dep // default path
     }
 
     /**
      * Try to tock a node. Hoists the node, if on wrong level.
      */
-    protected def tryTock(dep: StrictNode) = try {
+    protected def tryTock(dep: StrictNode): Unit = try {
       debug.logTock(dep)
       dep.tock()
     } catch {
-      case lm @ LevelMismatch =>
-        val lvl = lm.accessed.level
-        debug.logLevelMismatch(dep, lm.accessed)
-        hoist(dep, lvl + 1)
+      case LevelMismatch =>
+        debug.logLevelMismatch(dep, levelMismatchAccessed, levelMismatchCause)
+        dep.levelUpdated(dep.level, levelMismatchAccessed.level + 1, levelMismatchLocation)
+        hoist(dep, levelMismatchAccessed.level + 1)
     }
 
-    def levelMismatch(accessed: Node) {
-      LevelMismatch.accessed = accessed
+    def levelMismatch(accessed: Node, cause: Node, location: Int) = {
+      levelMismatchAccessed = accessed
+      levelMismatchCause = cause
+      levelMismatchLocation = location
+//      log.debug(s"Mismatch caused when ${debug.getName(cause)} (${cause.level}, initial ${cause.initialLevel}) accessed ${debug.getName(accessed)} (${accessed.level}, initial ${accessed.initialLevel}) (loc: ${location})")
       throw LevelMismatch
     }
 
     /**
      * Change the level of the given node and reschedule for later in this turn.
      */
-    def hoist(dep: StrictNode, newLevel: Int) {
-      dep.level = newLevel
-      dep match {
-        case dep: DependencyNode => dep.hoistDependents(newLevel + 1)
-        case _ =>
+    def hoist(dep: StrictNode, newLevel: Int): Unit = {
+      if (dep.level > LastNormalLevel)
+        throw new Exception(s"hoisting LeafNode ${dep.name} (${dep.level - LastNormalLevel} -> ${newLevel - LastNormalLevel})?")
+      if (dep.level < newLevel) {
+        dep.updateLevel(newLevel, 4)
+        propQueue reinsert dep
+        dep match {
+          case dep: DependencyNode => dep.hoistDependents(newLevel + 1)
+          case _ =>
+        }
       }
-      prioQueue reinsert dep
     }
 
-    def hoist(dep: Node, newLevel: Int) {
-      dep.level = newLevel
-      dep match {
-        case dep: DependencyNode => dep.hoistDependents(newLevel + 1)
-        case _ =>
-      }
-      dep match {
-        case dep: StrictNode => prioQueue reinsert dep
-        case _ =>
+    def hoist(dep: Node, newLevel: Int) = {
+      if (dep.level < newLevel) {
+        dep.updateLevel(newLevel, 5)
+        dep match {
+          case dep: StrictNode => propQueue reinsert dep
+          case _ =>
+        }
+        dep match {
+          case dep: DependencyNode => dep.hoistDependents(newLevel + 1)
+          case _ =>
+        }
       }
     }
   }
 
   class Engine extends Propagator {
     // todos that can be scheduled externally, thread-safe
-    private val asyncTodos = new ConcurrentLinkedQueue[AnyRef] // Runnable or ()=>Unit
+    private val asyncTodos = new ConcurrentLinkedQueue[() => Unit]
     // todos that can be scheduled only inside a turn, no need for thead-safety
     private val localTodos = new ArrayDeque[Tickable]
 
-    def schedule(r: Runnable) = {
-      asyncTodos.add(r)
-      scheduler.ensureTurnIsScheduled()
-    }
-    def schedule(op: => Unit) = {
+    private[react] def schedule(op: => Unit) = {
       asyncTodos.add(() => op)
       scheduler.ensureTurnIsScheduled()
+    }
+
+    private[react] def addToNext(op: => Unit) = {
+      asyncTodos.add(() => op)
     }
 
     def tickNextTurn(t: Tickable) = {
