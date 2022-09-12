@@ -1,4 +1,4 @@
-package scala.react
+package react
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{ Executors, ExecutorService }

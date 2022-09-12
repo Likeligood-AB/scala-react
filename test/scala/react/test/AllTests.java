@@ -1,4 +1,4 @@
-package scala.react.test;
+package react.test;
 
 import org.junit.runner.RunWith;
 import org.junit.runners.Suite;

@@ -1,4 +1,4 @@
-package scala.react
+package react
 import scala.annotation.elidable
 
 /**

@@ -1,4 +1,4 @@
-package scala.react.test.utils;
+package react.test.utils;
 
 import org.junit.Rule;
 import org.junit.rules.TestName;

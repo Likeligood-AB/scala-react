@@ -1,4 +1,4 @@
-package scala.react
+package react
 package test.utils
 
 import org.junit.{ After, Before, Rule }

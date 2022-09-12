@@ -1,4 +1,4 @@
-package scala.react
+package react
 package test
 
 import org.junit.Test

@@ -1,4 +1,4 @@
-package scala.react
+package react
 
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue

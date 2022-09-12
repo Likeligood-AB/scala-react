@@ -1,4 +1,4 @@
-package scala.react
+package react
 
 trait EventModule { module: Domain =>
   object Events {

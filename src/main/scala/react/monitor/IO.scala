@@ -1,4 +1,4 @@
-package scala.react.monitor
+package react.monitor
 
 import java.io._
 import java.nio.channels.FileChannel

@@ -1,4 +1,4 @@
-package scala.react
+package react
 package monitor
 
 import java.io._

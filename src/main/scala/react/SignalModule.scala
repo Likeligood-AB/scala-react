@@ -1,4 +1,4 @@
-package scala.react
+package react
 
 trait SignalModule { module: Domain =>
   def Strict[A](op: =>A): Signal[A] = new StrictOpSignal(op)
