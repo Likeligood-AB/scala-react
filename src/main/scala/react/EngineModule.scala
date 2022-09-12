@@ -2,14 +2,18 @@ package react
 
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue
-import scala.collection.mutable.ArrayStack
+
+private[react] object LevelMismatch extends util.control.NoStackTrace
+case class ReactLevelMismatch(nodeName: String) extends Exception(s"Level mismatch when accessing node $nodeName")
 
 abstract class EngineModule { self: Domain =>
+  import ReactiveModule.*
+
   // Dependent stack stuff is inlined, since it needs to be as efficient as possible
   private var depStack = new Array[Node](4)
   private var depStackSize = 0
 
-  protected def depStackPush(n: Node) {
+  protected def depStackPush(n: Node) = {
     if (depStackSize == depStack.length) {
       val newarr = new Array[Node](depStack.length * 2)
       System.arraycopy(depStack, 0, newarr, 0, depStack.length)
@@ -19,34 +23,35 @@ abstract class EngineModule { self: Domain =>
     depStackSize += 1
   }
 
-  protected def depStackPop() {
+  protected def depStackPop() = {
     if (depStackSize == 0) sys.error("Stack empty")
     depStackSize -= 1
     depStack(depStackSize) = null
   }
 
   protected def depStackTop: Node = depStack(depStackSize-1)
+  private[react] var levelMismatchAccessed: Node = _
+  private[react] var levelMismatchCause: Node = _
+  private[react] var levelMismatchLocation = 0
 
 
   // -----------------------------------------------------------------
-
 
   /**
    * Nodes that throw this exception must ensure that the dependent stack is in clean state, i.e.,
    * no leftovers on the stack. Otherwise dynamic dependency tracking goes havoc.
    */
-  private[react] object LevelMismatch extends util.control.NoStackTrace {
-    var accessed: Node = _
-  }
 
-  @inline def runTurn(op: => Unit) {
+  @inline def runTurn(op: => Unit): Unit = {
     op
-    engine.runTurn
+    engine.runTurn()
   }
 
-  @inline def runReadTurn(leaf: LeafNode) {
+  @inline def runReadTurn(leaf: LeafNode) = {
     engine.runReadTurn(leaf)
   }
+
+  case class VarUpdatePair[T](v: Var[T], op: T => T)
 
   abstract class Propagator {
     // the current turn index, first usable turn has index 2. Values 0 and 1 are reserved.
@@ -55,31 +60,66 @@ abstract class EngineModule { self: Domain =>
     // the current propagation level at which this engine is or previously was
     protected var level = 0
 
-    private var prioQueue: PriorityQueue[StrictNode] = new PriorityQueue[StrictNode] {
+    // update chain for vars
+    val updateChain = new ConcurrentLinkedQueue[VarUpdatePair[_]]
+
+    private val propQueue = new PriorityQueue[StrictNode] {
       def priority(n: StrictNode) = n.level
     }
 
-    def currentTurn: Long = turn
+    def currentTurn: Long = turn.toLong
     def currentLevel: Int = level
 
-    protected def applyTodos()
+    protected def applyAsyncTodos(): Unit
+    protected def applyLocalTodos(): Unit
+    protected def applyTodos(): Unit
 
-    def runTurn() {
+    def runTurn(d: String = "") = {
       turn += 1
-      debug.enterTurn(currentTurn)
+      debug.enterTurn(currentTurn, d)
 
       try {
         propagate()
       } catch {
-        case e => uncaughtException(e)
+        case LevelMismatch =>
+          throw ReactLevelMismatch(levelMismatchAccessed.name)
       } finally {
-        prioQueue.clear
+        propQueue.clear()
         level = 0
         debug.leaveTurn(currentTurn)
       }
     }
 
-    def runReadTurn(leaf: LeafNode) {
+    def setThread(): Unit = {
+      debug.isInTurn = true
+    }
+
+    def unsetThread(): Unit = {
+      debug.isInTurn = false
+    }
+
+    def isInTurn = debug.isInTurn
+
+    def runTurnFirstHalf() = {
+      turn += 1
+      debug.enterTurn(currentTurn)
+      applyAsyncTodos()
+    }
+
+    def runTurnSecondHalf() = {
+      try {
+        propagate()
+      } catch {
+        case LevelMismatch =>
+          throw ReactLevelMismatch(levelMismatchAccessed.name)
+      } finally {
+        propQueue.clear()
+        level = 0
+        debug.leaveTurn(currentTurn)
+      }
+    }
+
+    def runReadTurn(leaf: LeafNode) = {
       turn += 1
       debug.enterTurn(currentTurn)
 
@@ -87,20 +127,18 @@ abstract class EngineModule { self: Domain =>
         level = leaf.level
         leaf.invalidate()
         tryTock(leaf)
-      } catch {
-        case e => uncaughtException(e)
       } finally {
-        prioQueue.clear
+        propQueue.clear()
         level = 0
         debug.leaveTurn(currentTurn)
       }
     }
 
-    protected def propagate() {
-      val queue = prioQueue
+    protected def propagate() = {
+      val queue = propQueue
       applyTodos()
       while (!queue.isEmpty) {
-        val node = queue.dequeue
+        val node = queue.dequeue()
         assert(node.level >= level)
         if (node.level > level)
           level = node.level
@@ -198,23 +236,28 @@ abstract class EngineModule { self: Domain =>
         scheduler.ensureTurnIsScheduled()
       }
     }
-    protected def applyTodos() {
+
+    protected def applyAsyncTodos() = {
       var t = asyncTodos.poll()
       while (t ne null) {
         debug.logTodo(t)
-        t match {
-          case r: Runnable => r.run()
-          case f: Function0[_] => f()
-        }
+        t()
 
         t = asyncTodos.poll()
       }
+    }
 
+    protected def applyLocalTodos() = {
       while (!localTodos.isEmpty) {
         val t = localTodos.poll()
         debug.logTodo(t)
         t.tick()
       }
+    }
+
+    protected def applyTodos() = {
+      applyAsyncTodos()
+      applyLocalTodos()
     }
 
     //def newLocalChannel[P](r: Reactive[P, Any], p: P): Channel[P] = new LocalDelayChannel(r, p)
@@ -223,7 +266,17 @@ abstract class EngineModule { self: Domain =>
   class LocalDelayChannel[P](val node: Reactive[P, Any], p: P) extends Tickable with Channel[P] {
     private var pulse: P = p
     private var added = false
-    def push(r: Reactive[P, Any], p: P) {
+    override def pushOverride(r: Reactive[P, Any], p: P) = {
+      pulse = p
+      if (!added) {
+        added = true
+        engine.tickNextTurn(this)
+      }
+    }
+    def push(r: Reactive[P, Any], p: P) = {
+      if (added) {
+        throw new Exception(s"Var set twice in the same turn: ${node.reactiveDescriptor} (${debug.getName(node)}). Prev: $pulse New: $p")
+      }
       pulse = p
       if (!added) {
         added = true
@@ -232,7 +285,7 @@ abstract class EngineModule { self: Domain =>
     }
     def get(r: Reactive[P, Any]) = pulse
 
-    def tick() {
+    def tick() = {
       added = false
       node.tick()
     }

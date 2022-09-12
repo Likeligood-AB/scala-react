@@ -1,5 +1,9 @@
 package react
 
+import scala.annotation.implicitNotFound
+import scala.annotation.unchecked.uncheckedVariance
+import scala.util.NotGiven
+
 trait EventModule { module: Domain =>
   object Events {
     def once[A](a: A): Events[A] = {
@@ -19,8 +23,8 @@ trait EventModule { module: Domain =>
       with LazyNode {
       inputs foreach { _ subscribe this }
 
-      def doValidatePulse() {
-        if (inputs exists { _.isEmitting }) emit()
+      def doValidatePulse() = {
+        if (inputs exists { _.isEmitting }) emit(())
         else mute()
       }
     }
@@ -35,19 +39,19 @@ trait EventModule { module: Domain =>
     def getValue: Unit = ()
 
     protected class Mapped[B](f: A => B) extends LazyEvents1[A, B](outer) {
-      protected[this] def react(a: A) { emit(f(a)) }
+      protected[this] def react(a: A @uncheckedVariance) = { emit(f(a)) }
     }
 
     protected class Filtered(pred: A => Boolean) extends StrictEvents1[A, A](outer) {
-      protected[this] def react(a: A) { if (pred(a)) emit(a) }
+      protected[this] def react(a: A @uncheckedVariance) = { if (pred(a)) emit(a) }
     }
 
     protected class Collected[B](f: PartialFunction[A, B]) extends StrictEvents1[A, B](outer) {
-      protected[this] def react(a: A) { if (f isDefinedAt a) emit(f(a)) }
+      protected[this] def react(a: A @uncheckedVariance) = { if (f isDefinedAt a) emit(f(a)) }
     }
 
     protected class Taken(private var count: Int) extends StrictEvents1[A, A](outer) {
-      protected[this] def react(a: A) {
+      protected[this] def react(a: A @uncheckedVariance) = {
         if (count > 0) {
           count -= 1
           emit(a)
@@ -69,7 +73,7 @@ trait EventModule { module: Domain =>
       private var head = 0
       private var size = 0 // only used until we have seen delay number of events
 
-      protected[this] def react(a: A) {
+      protected[this] def react(a: A @uncheckedVariance) = {
         if(size < delay) {
           buffer(size) = a
           size += 1
@@ -84,23 +88,23 @@ trait EventModule { module: Domain =>
     protected class Scanned[B](init: B)(f: (B, A) => B) extends StrictEvents1[A, B](outer) {
       pulse = init
 
-      protected[this] def react(a: A) { emit(f(this.pulse, a)) }
+      protected[this] def react(a: A @uncheckedVariance) = { emit(f(this.pulse.asInstanceOf[B], a)) }
     }
 
     protected class ScannedMutable[B](init: B)(f: (B, A) => B) extends StrictEvents1[A, B](outer) {
       pulse = init
 
-      protected[this] def react(a: A) {
-        mutable {
-          emit(f(this.pulse, a))
+      protected[this] def react(a: A @uncheckedVariance) = {
+        muteable {
+          emit(f(this.pulse.asInstanceOf[B], a))
         }
       }
     }
 
     protected class Scanned1[B >: A](f: (B, B) => B) extends StrictEvents1[B, B](outer) {
       private var started = false
-      protected[this] def react(a: B) = {
-        if (started) emit(f(this.pulse, a))
+      protected[this] def react(a: B @uncheckedVariance) = {
+        if (started) emit(f(this.pulse.asInstanceOf[B], a))
         else {
           started = true
           emit(a)
@@ -108,13 +112,13 @@ trait EventModule { module: Domain =>
       }
     }
 
-    protected class Merged[B >: A](val input1: Events[B], val input2: Events[B]) extends Events[B]
+    class Merged[B >: A](val input1: Events[B], val input2: Events[B]) extends Events[B]
       with Dependent2[B, Unit]
       with LazyNode {
       input1 subscribe this
       input2 subscribe this
 
-      def doValidatePulse() {
+      def doValidatePulse() = {
         input1.ifEmittingElse { emit _ } {
           input2.ifEmittingElse { emit _ } { mute() }
         }
@@ -127,7 +131,7 @@ trait EventModule { module: Domain =>
       // level = (if(cur==null) outer.level else math.max(outer.level, cur.level)) + 1
 
       outer.subscribe(this)
-      def doValidatePulse() {
+      def doValidatePulse() = {
         outer.ifEmitting { e =>
           if (cur != null) cur.unsubscribe(this)
           cur = isEvents(e)
@@ -138,7 +142,7 @@ trait EventModule { module: Domain =>
         }
       }
 
-      protected override def disconnect() {
+      protected override def disconnect() = {
         outer.unsubscribe(this)
         cur.unsubscribe(this)
         super.disconnect()
@@ -188,7 +192,14 @@ trait EventModule { module: Domain =>
      * third event, it applies the last result and third value from this stream to the given
      * function and emits the result ... and so on.
      */
-    def scan[B](init: B)(f: (B, A) => B): Events[B] = new Scanned(init)(f)
+    def scan[B](init: B)(using
+               ctx: Context,
+               @implicitNotFound("This method can only be used within a react context")
+               using: NotGiven[ctx.NoContext]
+    )(f: ctx.LeafNodeContext ?=> (B, A) => B): Events[B] = {
+      given ctx.LeafNodeContext = null
+      new Scanned(init)(f)
+    }
 
     /**
      * An event stream that applies the first and second value from this stream to the given
@@ -196,7 +207,14 @@ trait EventModule { module: Domain =>
      * event, it applies the last result and third value from this stream to the given function
      * and emits the result ... and so on.
      */
-    def scan1[B >: A](f: (B, B) => B): Events[B] = new Scanned1(f)
+    def scan1[B >: A](using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              using: NotGiven[ctx.NoContext]
+    )(f: ctx.LeafNodeContext ?=> (B, B) => B): Events[B] = {
+      given ctx.LeafNodeContext = null
+      new Scanned1(f)
+    }
 
     /**
      * A scan that can skip events from this event stream.
@@ -205,12 +223,31 @@ trait EventModule { module: Domain =>
      * indicates that the current event from this event stream should be skipped and the resulting
      * event stream should not emit in that turn.
      */
-    def scanMutable[B](init: B)(f: (B, A) => B): Events[B] = new ScannedMutable(init)(f)
+    def scanMutable[B](init: B)(using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              using: NotGiven[ctx.NoContext]
+    )(f: ctx.LeafNodeContext ?=> (B, A) => B): Events[B] = {
+      given ctx.LeafNodeContext = null
+      new ScannedMutable(init)(f)
+    }
 
     /**
      * An event stream that emits the first `count` events from this stream.
      */
     def take(count: Int): Events[A] = new Taken(count)
+
+   /**
+     * takeUntil last is true events from this stream.
+     */
+    def takeUntil(using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              using: NotGiven[ctx.NoContext]
+    )(last: ctx.LeafNodeContext ?=> A => Boolean): Events[A] = {
+      given ctx.LeafNodeContext = null
+      new TakeUntil(last)
+    }
 
     /**
      * An event stream that emits all event from this stream after the first `count` events.
@@ -237,17 +274,17 @@ trait EventModule { module: Domain =>
   /**
    * An event stream with a single input.
    */
-  abstract class Events1[+A, +B](protected val input: Reactive[A, Any])
+  abstract class Events1[+A, +B](val input: Reactive[A, Any])
     extends Events[B]
     with Dependent1[A, Any] {
 
     connect()
 
-    def doValidatePulse() {
+    def doValidatePulse() = {
       input.ifEmitting(react _)
       setPulseValid()
     }
-    protected[this] def react(a: A)
+    protected[this] def react(a: A @uncheckedVariance): Unit
   }
 
   abstract class LazyEvents[+A]
@@ -267,24 +304,26 @@ trait EventModule { module: Domain =>
     with StrictNode
 
   protected[this] class ChangeEvents[P](input: Reactive[P, Any]) extends LazyEvents1[P, P](input) {
-    def react(p: P) { emit(p) }
+    def react(p: P) = { emit(p) }
   }
 
-  object EventSource {
-    def apply[A](implicit owner: Owner): EventSource[A] = new EventSource[A](owner)
+  def EventSource[A](using owner: Owner, debugName: DebugName): EventSource[A] = {
+    val es = new EventSource[A](owner)
+    debugName.name.foreach(name => debug.setName(es, name))
+    es
   }
 
   /**
    * An externally mutable event stream.
    */
-  class EventSource[A] protected (val owner: Owner) extends Events[A] with SimpleSource[A, Unit] with StrictNode {
+  class EventSource[A] (val owner: Owner) extends Events[A] with SimpleSource[A, Unit] with StrictNode {
     protected[react] val channel = owner.newChannel(this, null.asInstanceOf[A])
 
     /**
      * Lets this stream emit the given value, either in the next turn, if the owner is the domain or
      * in the current turn if the owner is a router.
      */
-    def <<(a: A) {
+    def <<(a: A) = {
       if (owner eq DomainOwner) channel.push(this, a)
       else {
         emit(a)

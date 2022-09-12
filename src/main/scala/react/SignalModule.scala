@@ -40,26 +40,26 @@ trait SignalModule { module: Domain =>
     /* A signal's pulse and value are really the same, except the flag that indicates whether
      * the signal is emitting or not.
      */
-    def getValue: A = getPulse
+    def getValue: A = getPulse.asInstanceOf[A]
+    def getLevel = level
 
     def toStrict: Signal[A]
 
     // Fix types, when/if SI-3272 gets fixed
     protected def shouldEmit(oldVal: Any, newVal: Any): Boolean = oldVal != newVal
 
-    override protected[this] def emit(p: Any) {
+    override protected[this] def emit(p: Any) = {
       if(shouldEmit(getValue, p)) super.emit(p)
     }
 
-    override protected[react] def freePulse() {
+    override protected[react] def freePulse() = {
       // the pulse is the value for signals, so don't do anything here.
     }
   }
 
   abstract class FuncSignal[A] extends Signal[A] with OpaqueReactive[A, A] {
-    protected def react() {
-      val v = eval
-      emit(v)
+    protected def react() = {
+      emit(eval)
     }
 
     protected def eval: A
@@ -82,6 +82,8 @@ trait SignalModule { module: Domain =>
   class LazyOpSignal[A](op: => A) extends LazyFuncSignal[A] {
     protected def eval = op
 
+    override def changes: Events[A] = this.toStrict.changes
+
     def toStrict: Signal[A] = new StrictOpSignal(op)
   }
 
@@ -94,11 +96,11 @@ trait SignalModule { module: Domain =>
 
     input.subscribe(this)
 
-    def doValidatePulse() {
+    def doValidatePulse() = {
       input.ifEmitting(pulsate _)
       setPulseValid()
     }
-    protected[this] def pulsate(a: A)
+    protected[this] def pulsate(a: Any): Unit
   }
 
   abstract class StrictSignal1[+A, +B](input: Reactive[A, Any])
@@ -166,7 +168,7 @@ trait SignalModule { module: Domain =>
   case class Val[A](a: A) extends Signal[A] with MuteNode {
     pulse = a
 
-    def toStrict = this
+    def toStrict: Signal[A] = this
     override def reactiveDescriptor = "Val"
   }
 }
