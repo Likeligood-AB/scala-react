@@ -32,49 +32,6 @@ trait SchedulerModule { self: Domain =>
   }
 
   class ManualScheduler extends Scheduler {
-    def ensureTurnIsScheduled() {}
-  }
-
-  /**
-   * A scheduler with a thread-safe API.
-   */
-  abstract class ThreadSafeScheduler extends Scheduler {
-    private val isScheduled = new AtomicBoolean(false)
-
-    private val runnable = new Runnable {
-      def run {
-        // TODO: do we really need to CAS twice?
-        if (isScheduled.compareAndSet(true, false)) engine.runTurn()
-      }
-    }
-
-    def ensureTurnIsScheduled() {
-      if (isScheduled.compareAndSet(false, true)) {
-        schedule(runnable)
-      }
-    }
-
-    /**
-     * To be implemented by subclasses.
-     *
-     * This uses a Runnable and not a Scala closure to avoid wrapping them when interacting
-     * with existing Java frameworks.
-     */
-    protected def schedule(r: Runnable)
-  }
-
-  /**
-   * A scheduler running turns on a java.util.concurrent thread-pool.
-   */
-  class ThreadPoolScheduler(pool: ExecutorService) extends ThreadSafeScheduler {
-    def this() = this(Executors.newCachedThreadPool())
-    protected def schedule(r: Runnable) = pool.execute(r)
-  }
-
-  /**
-   * A scheduler running turns on the Swing event dispatcher thread (EDT).
-   */
-  class SwingScheduler extends ThreadSafeScheduler {
-    def schedule(r: Runnable) = SwingUtilities.invokeLater(r)
+    def ensureTurnIsScheduled() = {}
   }
 }
