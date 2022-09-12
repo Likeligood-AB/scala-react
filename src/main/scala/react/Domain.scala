@@ -1,5 +1,12 @@
 package react
-import scala.annotation.elidable
+
+trait AbsDomain {
+  type Events[+T]
+  type EventSource[T] <: Events[T]
+  type Signal[+T]
+  type Var[T] <: Signal[T]
+  type Val[T] <: Signal[T]
+}
 
 /**
  * Defines all reactive classes by mixing in all reactive modules.
@@ -8,42 +15,38 @@ import scala.annotation.elidable
  *
  * Except the scheduler interface, no method in neither class is guaranteed to be thread-safe.
  */
-abstract class Domain extends ReactiveModule
+trait Domain(debugConfiguration: DebugConfiguration) extends ReactiveModule
+  with AbsDomain
   with SignalModule
   with EventModule
   with SchedulerModule { domain =>
+  val scheduler: Scheduler
+  def engine: Engine
 
-  protected val scheduler: Scheduler
-  protected def engine: Engine
+  protected class SimpleScheduler extends Scheduler {
+    var turnScheduled = false
 
-  val debug: Debug[this.type] =
-    System.getProperty("scala.react.debug", "no").toLowerCase match {
-      case "no" => new NilDebug[this.type](domain)
-      case "print" => new ConsoleDebug[this.type](this)
-      case "log" => new monitor.LogDebug[this.type](this)
+    def ensureTurnIsScheduled(): Unit = {
+      if (!turnScheduled) {
+        turnScheduled = true
+      }
     }
+  }
 
-  /**
-   * A reactive version of `scala.App`, running all initialization code on this domain.
-   * Automatically starts the domain in the main method.
-   *
-   * @see scala.App
-   * @see scala.DelayedInit
-   */
-  trait ReactiveApp extends App {
-    def main() {}
-
-    override def main(args: Array[String]) {
-      domain schedule { super.main(args) }
-      domain.start()
-      main()
+  val debug: Debug[this.type] = {
+    import DebugConfiguration.*
+    debugConfiguration match {
+      case NoDebug => new NilDebug[this.type](domain)
+      case SilentDebug => new SilentDebug[this.type](this)
+      case PrintDebug => new ConsoleDebug[this.type](this)
+      case CustomDebug(logOp) => new CustomLogDebug[this.type](this, logOp)
     }
   }
 
   /**
    * Starts processing events. Thread-safe.
    */
-  def start() {
+  def start() = {
     debug.logStart()
     scheduler.start()
   }
