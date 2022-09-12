@@ -57,11 +57,11 @@ class LogDebug[D <: Domain](dom: D) extends AbstractDebug(dom) {
     id
   }
 
-  private def writeTag(tag: Byte) {
+  private def writeTag(tag: Byte) = {
     log putByte tag
   }
 
-  private def writeNodeId(id: Long) {
+  private def writeNodeId(id: Long) = {
     idSize match {
       case 1 => log putByte id.toByte
       case 2 => log putShort id.toShort
@@ -76,14 +76,16 @@ class LogDebug[D <: Domain](dom: D) extends AbstractDebug(dom) {
 
   private def time() = System.nanoTime - t0
 
-  def logStart() {
+  def logLevelMismatch(accessor: Node, accessed: Node, cause: Node): Unit = ???
+
+  def logStart() = {
     val startTime = System.currentTimeMillis
     t0 = time()
     writeHeader(0)
     log putLong startTime
   }
 
-  def writeHeader(l: Long) {
+  def writeHeader(l: Long) = {
     header.rewind()
     header putLong l
   }

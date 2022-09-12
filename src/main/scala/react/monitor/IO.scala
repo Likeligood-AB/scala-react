@@ -16,7 +16,7 @@ object IO {
 
   def newLogFile: File = File.createTempFile("scalareact", "log")
 
-  def unmap(buf: ByteBuffer) {
+  def unmap(buf: ByteBuffer) = {
     buf match {
       case buf : sun.nio.ch.DirectBuffer =>
         buf.cleaner.clean()

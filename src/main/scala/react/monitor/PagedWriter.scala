@@ -14,7 +14,7 @@ class PagedWriter(file: File, chunkSize: Int = 1000000) {
   val channel = IO.writeChannel(file)
   private var buf = IO.mapForWriting(channel, offset, chunkSize)
 
-  private def remap() {
+  private def remap() = {
     offset += buf.position()
     buf = channel.map(FileChannel.MapMode.READ_WRITE, offset, chunkSize)
   }
