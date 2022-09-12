@@ -94,7 +94,7 @@ abstract class PriorityQueue[A >: Null: Manifest] {
   private def indexOf(elem: A): Int = {
     var i = 1
     while(i < size0) {
-      if (array(i) == elem) return i
+      if (array(i) eq elem) return i
       i += 1
     }
     -1
