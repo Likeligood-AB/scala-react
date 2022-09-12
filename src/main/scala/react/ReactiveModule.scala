@@ -32,11 +32,50 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * Runs the given `op` on maximum level in this turn, i.e., `op` is safe to query any other
    * node.
    */
-  def doLater(op: => Unit) {
-    new DoLaterNode { def react() = op }
+  def doLater(using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              notNoCtx: NotGiven[ctx.NoContext],
+              @implicitNotFound("This method can not be used in a leaf node context")
+              noLeaf: NotGiven[ctx.LeafNodeContext],
+    )(op: ctx.LeafNodeContext ?=> Unit): Unit = {
+    new DoLaterNode(DoLaterLevel) {
+      given ctx.LeafNodeContext = null
+      def react() = op
+    }
+  }
+  def doLast(using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              using: NotGiven[ctx.NoContext]
+    )(op: ctx.LeafNodeContext ?=> Unit): Unit = {
+    new DoLaterNode(DoLastLevel) {
+      given ctx.LeafNodeContext = null
+      def react() = op
+  }
+  }
+  def doLaterAtObserve(using
+              ctx: Context,
+              @implicitNotFound("This method can only be used within a react context")
+              using: NotGiven[ctx.NoContext]
+    )(op: ctx.LeafNodeContext ?=> Unit): Unit = {
+    new DoLaterNode(ObserveLevel) {
+      given ctx.LeafNodeContext = null
+      def react() = op
+    }
   }
 
-  private abstract class DoLaterNode extends LeafNode {
+
+  def subscribeAhead(nodes: DependencyNode*): Unit = {
+    debug.assertInTurn()
+
+    nodes.maxByOption(_.level).foreach(n => {
+      n.checkTopology(depStackTop, 8)
+      n.subscribe(depStackTop)
+    })
+  }
+
+  private abstract class DoLaterNode(level: Int) extends LeafNode(level) {
     tick()
   }
 
@@ -526,14 +565,32 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
    * A reactive that always has a value, i.e., for which `isDefined == true` always holds.
    */
   abstract class TotalReactive[+P, +V] extends Reactive[P, V] {
-    def now: V = {
-      checkTopology()
+    def now(using
+            ctx: Context,
+            @implicitNotFound("This method can only be used within a react context")
+            using: NotGiven[ctx.NoContext]
+    )(using
+      @implicitNotFound("Signals may only be read from inside dependency nodes or leaf nodes")
+      ev: ctx.DependencyNodeContext | ctx.LeafNodeContext
+    ): V = {
+      try {
+        debug.assertInTurn()
+        checkTopology(this, 5)
       validateValue()
       getValue
+      } catch {
+        case LevelMismatch =>
+          throw LevelMismatch
+      }
     }
 
-    def apply(): V = {
-      checkTopology()
+    def apply()(using
+                ctx: Context,
+                @implicitNotFound("This method can only be used within a react context")
+                using: NotGiven[ctx.NoContext]
+    )(using ev: ctx.DependencyNodeContext): V = {
+      debug.assertInTurn()
+      checkTopology(depStackTop, 6)
       subscribe(depStackTop)
       validateValue()
       getValue
@@ -700,8 +757,46 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Observes pulses from the given reactive, starting in the current turn.
      */
-    protected def observe[P, V](r: Reactive[P, V])(op: P => Unit): Observer = {
+    def observe[P, V](using
+                 ctx: Context,
+                 @implicitNotFound("This method can only be used within a react context")
+                 ev1: NotGiven[ctx.NoContext],
+                 @implicitNotFound("Observers can not be created inside dependency nodes")
+                 ev2: NotGiven[ctx.DependencyNodeContext]
+    )(r: Reactive[P, V])(op: ctx.LeafNodeContext ?=> P => Unit): Observer = {
+      given ctx.LeafNodeContext = null
       val ob = new Observer1(r, op)
+      ob.tick()
+      ob
+    }
+
+    def doLaterAndObserve[V](using
+                 ctx: Context,
+                 @implicitNotFound("This method can only be used within a react context")
+                 ev1: NotGiven[ctx.NoContext],
+                 @implicitNotFound("Observers can not be created inside dependency nodes")
+                 ev2: NotGiven[ctx.DependencyNodeContext]
+    )(v: Signal[V])(op: ctx.LeafNodeContext ?=> V => Unit): Observer = {
+      doLater {
+        if (!v.isEmitting)
+          op(v.now)
+      }
+
+      observe(v)(op)
+    }
+
+    /**
+      * Observes pulses from the given reactive, starting in the current turn.
+      */
+    def observeUntil[P, V](using
+                 ctx: Context,
+                 @implicitNotFound("This method can only be used within a react context")
+                 ev1: NotGiven[ctx.NoContext],
+                 @implicitNotFound("Observers can not be created inside dependency nodes")
+                 ev2: NotGiven[ctx.DependencyNodeContext]
+    )(r: Reactive[P, V])(op: ctx.LeafNodeContext ?=> P => Boolean): Observer = {
+      given ctx.LeafNodeContext = null
+      val ob = new ObserverUntil(r, op)
       ob.tick()
       ob
     }
@@ -709,7 +804,14 @@ abstract class ReactiveModule extends EngineModule { module: Domain =>
     /**
      * Observes exactly one pulse from the given reactive, starting in the current turn.
      */
-    protected def observeOnce[P, V](r: Reactive[P, V])(op: P => Unit): Observer = {
+    def observeOnce[P, V](using
+                          ctx: Context,
+                          @implicitNotFound("This method can only be used within a react context")
+                          ev1: NotGiven[ctx.NoContext],
+                          @implicitNotFound("Observers can not be created inside dependency nodes")
+                          ev2: NotGiven[ctx.DependencyNodeContext]
+    )(r: Reactive[P, V])(op: ctx.LeafNodeContext ?=> P => Unit): Observer = {
+      given ctx.LeafNodeContext = null
       new ObserverOnce1(r, op)
     }
 

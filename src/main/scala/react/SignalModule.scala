@@ -1,8 +1,37 @@
 package react
 
+import scala.annotation.implicitNotFound
+import scala.util.NotGiven
+
 trait SignalModule { module: Domain =>
-  def Strict[A](op: =>A): Signal[A] = new StrictOpSignal(op)
-  def Lazy[A](op: =>A): Signal[A] = new LazyOpSignal(op)
+  import ReactiveModule.*
+
+  def Strict[A](using
+                debugName: DebugName,
+                ctx: Context,
+                @implicitNotFound("This method can only be used within a react context")
+                using: NotGiven[ctx.NoContext]
+    )(using
+      @implicitNotFound("Signals may not be created inside leaf nodes or dependency nodes")
+      ev: NotGiven[ctx.DependencyNodeContext | ctx.LeafNodeContext]
+    )(op: ctx.DependencyNodeContext ?=> A): Signal[A] = {
+      given ctx.DependencyNodeContext = null
+      val node = StrictOpSignal(op)
+      debugName.name.foreach(name => debug.setName(node, name))
+      node
+    }
+
+  def Lazy[A](using
+                ctx: Context,
+                @implicitNotFound("This method can only be used within a react context")
+                using: NotGiven[ctx.NoContext]
+  )(using
+    @implicitNotFound("Signals may not be created inside leaf nodes or dependency nodes")
+    ev: NotGiven[ctx.DependencyNodeContext | ctx.LeafNodeContext]
+  )(op: ctx.DependencyNodeContext ?=> A): Signal[A] = {
+    given ctx.DependencyNodeContext = null
+    new LazyOpSignal(op)
+  }
 
   /**
    * A time-varying value.
@@ -79,33 +108,48 @@ trait SignalModule { module: Domain =>
   protected[this] class HoldSignal[P](init: P)(input: Reactive[P, Any]) extends StrictSignal1[P, P](input) {
     pulse = init
 
-    def pulsate(p: P) { emit(p) }
+    def pulsate(p: Any) = { emit(p.asInstanceOf[P]) }
 
-    def toStrict = this
+    def toStrict: Signal[P] = this
   }
 
-  object Var {
+  def doUpdateLater(op: => Unit): Unit = {
+    new DoUpdateLaterNode { def react() = op }
+  }
+
+  private abstract class DoUpdateLaterNode extends LeafNode(UpdateLaterLevel) {
+    tick()
+  }
+
     /**
      * Creates a mutable signal with the given owner.
      */
-    def apply[A](init: A)(implicit owner: Owner): Var[A] = new Var(init, owner)
-  }
+  def Var[A](init: A)(using
+                         ctx: Context,
+                         @implicitNotFound("This method can only be used within a react context")
+                         using: NotGiven[ctx.NoContext]
+  )(using
+    @implicitNotFound("Signals may not be created inside leaf nodes")
+    ev1: NotGiven[ctx.LeafNodeContext],
+    @implicitNotFound("Signals may not be created inside dependency nodes")
+    ev2: NotGiven[ctx.DependencyNodeContext],
+  )(using owner: Owner): Var[A] = new Var(init, owner)
 
   /**
    * An externally mutable signal.
    */
-  class Var[A] protected(init: A, val owner: Owner) extends Signal[A] with SimpleSource[A, A] with StrictNode {
+  class Var[A] (init: A, val owner: Owner) extends Signal[A] with SimpleSource[A, A] with StrictNode {
     pulse = init
 
     protected[react] val channel = owner.newChannel(this, init)
 
-    def toStrict = this
+    def toStrict: Signal[A] = this
 
     /**
      * Sets the value of this signal, either in the next turn, if the owner is the domain or
      * in the current turn if the owner is a router.
      */
-    def update(a: A) {
+    def update(a: A): Unit = {
       if(owner eq DomainOwner) channel.push(this, a)
       else {
         emit(a)

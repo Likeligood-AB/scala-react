@@ -148,18 +148,39 @@ trait EventModule { module: Domain =>
     /**
      * An event stream that emits every value from this stream mapped by the given function.
      */
-    def map[B](f: A => B): Events[B] = new Mapped(f)
+    def map[B](using
+               ctx: Context,
+               @implicitNotFound("This method can only be used within a react context")
+               using: NotGiven[ctx.NoContext]
+    )(f: ctx.LeafNodeContext ?=> A => B): Events[B] = {
+      given ctx.LeafNodeContext = null
+      new Mapped(f)
+    }
     /**
      * An event stream that emits all values from this stream for which the given predicate
      * evaluates to `true`.
      */
-    def filter(p: A => Boolean): Events[A] = new Filtered(p)
+    def filter(using
+               ctx: Context,
+               @implicitNotFound("This method can only be used within a react context")
+               using: NotGiven[ctx.NoContext]
+    )(p: ctx.LeafNodeContext ?=> A => Boolean): Events[A] = {
+      given ctx.LeafNodeContext = null
+      new Filtered(p)
+    }
     /**
      * An event stream that emits all values from this stream for which the given partial function
      * is defined. Additionally maps, i.e., `es collect { case e if p(e) => f(e) }` is equivalent to
      * `es filter p map f`.
      */
-    def collect[B](f: PartialFunction[A, B]): Events[B] = new Collected(f)
+    def collect[B](using
+               ctx: Context,
+               @implicitNotFound("This method can only be used within a react context")
+               using: NotGiven[ctx.NoContext]
+    )(f: ctx.LeafNodeContext ?=> PartialFunction[A, B]): Events[B] = {
+      given ctx.LeafNodeContext = null
+      new Collected(f)
+    }
 
     /**
      * An event stream that applies `init` and the value from this stream to the given
