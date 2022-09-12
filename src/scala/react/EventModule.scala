@@ -1,28 +1,11 @@
 package scala.react
 
-import scala.util.continuations._
-
 trait EventModule { module: Domain =>
   object Events {
     def once[A](a: A): Events[A] = {
       val es = EventSource[A]
       es << a
       es
-    }
-
-    /**
-     * Creates a flow event that runs through the given `op` once.
-     */
-    def flow[A](op: EventsFlowOps[A] => Unit @suspendable): Events[A] = new FlowEvents[A] {
-      def body = op(this)
-    }
-
-    /**
-     * Creates a flow event that runs through the given `op` repeatedly until disposed, e.g., by
-     * calling `halt`.
-     */
-    def loop[A](op: EventsFlowOps[A] => Unit @suspendable): Events[A] = new FlowEvents[A] {
-      def body = while (!isDisposed) op(this)
     }
 
     /**

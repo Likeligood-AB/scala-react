@@ -1,27 +1,8 @@
 package scala.react
 
-import scala.util.continuations._
-
 trait SignalModule { module: Domain =>
   def Strict[A](op: =>A): Signal[A] = new StrictOpSignal(op)
   def Lazy[A](op: =>A): Signal[A] = new LazyOpSignal(op)
-
-  object Signal {
-    /**
-     * Creates a flow signal that runs through the given `op` once.
-     */
-    def flow[A](init: A)(op: SignalFlowOps[A]=>Unit @suspendable): Signal[A] = new FlowSignal(init) {
-      def body = op(this)
-    }
-
-    /**
-     * Creates a flow signal that runs through the given `op` repeatedly until disposed, e.g., by
-     * calling `halt`.
-     */
-    def loop[A](init: A)(op: SignalFlowOps[A]=>Unit @suspendable): Signal[A] = new FlowSignal(init) {
-      def body = while(!isDisposed) op(this)
-    }
-  }
 
   /**
    * A time-varying value.

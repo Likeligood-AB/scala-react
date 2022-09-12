@@ -55,13 +55,8 @@ abstract class EngineModule { self: Domain =>
     // the current propagation level at which this engine is or previously was
     protected var level = 0
 
-    private var propQueue: PropQueue[StrictNode] = System.getProperty("scala.react.propqueue", "prio").toLowerCase match {
-      case "prio" => new PriorityQueue[StrictNode] {
-        def priority(n: StrictNode) = n.level
-      }
-      case "topo" => new TopoQueue[StrictNode] {
-        def depth(n: StrictNode) = n.level
-      }
+    private var prioQueue: PriorityQueue[StrictNode] = new PriorityQueue[StrictNode] {
+      def priority(n: StrictNode) = n.level
     }
 
     def currentTurn: Long = turn
@@ -78,7 +73,7 @@ abstract class EngineModule { self: Domain =>
       } catch {
         case e => uncaughtException(e)
       } finally {
-        propQueue.clear
+        prioQueue.clear
         level = 0
         debug.leaveTurn(currentTurn)
       }
@@ -95,14 +90,14 @@ abstract class EngineModule { self: Domain =>
       } catch {
         case e => uncaughtException(e)
       } finally {
-        propQueue.clear
+        prioQueue.clear
         level = 0
         debug.leaveTurn(currentTurn)
       }
     }
 
     protected def propagate() {
-      val queue = propQueue
+      val queue = prioQueue
       applyTodos()
       while (!queue.isEmpty) {
         val node = queue.dequeue
@@ -123,7 +118,7 @@ abstract class EngineModule { self: Domain =>
         tryTock(dep)
       else if (depLevel < level) // can happen for signals that are created on the fly
         hoist(dep, level + 1)
-      else propQueue += dep // default path
+      else prioQueue += dep // default path
     }
 
     /**
@@ -164,7 +159,7 @@ abstract class EngineModule { self: Domain =>
         case dep: DependencyNode => dep.hoistDependents(newLevel + 1)
         case _ =>
       }
-      propQueue reinsert dep
+      prioQueue reinsert dep
     }
 
     def hoist(dep: Node, newLevel: Int) {
@@ -174,7 +169,7 @@ abstract class EngineModule { self: Domain =>
         case _ =>
       }
       dep match {
-        case dep: StrictNode => propQueue reinsert dep
+        case dep: StrictNode => prioQueue reinsert dep
         case _ =>
       }
     }

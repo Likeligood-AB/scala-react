@@ -11,7 +11,6 @@ import scala.annotation.elidable
 abstract class Domain extends ReactiveModule
   with SignalModule
   with EventModule
-  with FlowModule
   with SchedulerModule { domain =>
 
   protected val scheduler: Scheduler
