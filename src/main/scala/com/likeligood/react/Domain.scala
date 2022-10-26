@@ -1,4 +1,4 @@
-package react
+package com.likeligood.react
 
 trait AbsDomain {
   type Events[+T]

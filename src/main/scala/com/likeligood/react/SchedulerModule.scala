@@ -1,4 +1,4 @@
-package react
+package com.likeligood.react
 
 import scala.annotation.implicitNotFound
 import scala.util.NotGiven

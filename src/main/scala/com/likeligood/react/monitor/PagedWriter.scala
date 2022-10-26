@@ -1,4 +1,4 @@
-package react.monitor
+package com.likeligood.react.monitor
 
 import java.io.File
 import java.nio.channels.FileChannel

@@ -1,4 +1,4 @@
-package react
+package com.likeligood.react
 
 import java.lang.management.ManagementFactory
 import java.text.SimpleDateFormat

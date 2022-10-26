@@ -1,7 +1,8 @@
 name := "scala-react"
 
-organization := "github.com.ingoem"
+organization := "com.likeligood"
 
-version := "1.0"
+version := "0.1.0"
 
 scalaVersion := "3.2.0"
+

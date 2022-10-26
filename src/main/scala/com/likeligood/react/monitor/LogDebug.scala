@@ -1,4 +1,4 @@
-package react
+package com.likeligood.react
 package monitor
 
 import java.io._

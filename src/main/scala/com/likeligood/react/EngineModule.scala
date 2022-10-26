@@ -1,4 +1,4 @@
-package react
+package com.likeligood.react
 
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue
